@@ -7,6 +7,7 @@ import { HelloWorldItemDefinition } from "./HelloWorldItemDefinition";
 import { ItemEditorDefaultView } from "../../components/ItemEditor";
 import { GettingStartedSection } from "./GettingStartedSection";
 import { ItemDetailsSection } from "./ItemDetailsSection";
+import { FmdUdfProbe } from "./FmdUdfProbe";
 import "./HelloWorldItem.scss";
 
 interface HelloWorldItemDefaultViewProps {
@@ -47,12 +48,16 @@ export function HelloWorldItemDefaultView({
       }}
       center={{
          content: (
-          <ItemDetailsSection
-            item={item}
-            messageValue={messageValue}
-            onMessageChange={onMessageChange}
-            onOpenResource={handleOpenResource}
-          />
+          <>
+            <ItemDetailsSection
+              item={item}
+              messageValue={messageValue}
+              onMessageChange={onMessageChange}
+              onOpenResource={handleOpenResource}
+            />
+            {/* FMD spike: host-brokered token -> UDF (proves the native-frontend auth path). */}
+            <FmdUdfProbe workloadClient={workloadClient} />
+          </>
         )
       }}
     />
