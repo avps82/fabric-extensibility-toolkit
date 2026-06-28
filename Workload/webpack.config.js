@@ -20,7 +20,9 @@ module.exports = {
     output: {
         filename: "bundle.[fullhash].js",
         path: path.resolve(__dirname, "dist"),
-        publicPath: '/',
+        // Root by default (Azure SWA / dev). For a subpath host (e.g. GitHub Pages at
+        // /<repo>/) set PUBLIC_PATH so emitted asset URLs resolve. Trailing slash required.
+        publicPath: process.env.PUBLIC_PATH || '/',
     },
     plugins: [
         new CleanWebpackPlugin(),
