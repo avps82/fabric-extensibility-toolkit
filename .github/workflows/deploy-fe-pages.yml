@@ -1,0 +1,58 @@
+name: Deploy FMD workload FE to Pages
+
+# NOTE: superseded — hosting moves to Azure DevOps pipeline + Azure Static Web App.
+# Kept as a build reference; manual-only so it doesn't auto-run/fail.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Write .env.prod (FE remote host = GitHub Pages subpath)
+        working-directory: Workload
+        run: |
+          cat > .env.prod <<'EOF'
+          WORKLOAD_HOSTING_TYPE=FERemote
+          WORKLOAD_VERSION=1.0.0
+          WORKLOAD_NAME=Org.FmdOnboarding
+          ITEM_NAMES=HelloWorld
+          FRONTEND_APPID=57c0c50a-c912-4b31-bca0-ad717b613937
+          FRONTEND_URL=https://avps82.github.io/fabric-extensibility-toolkit/
+          ENABLE_PLAYGROUND=false
+          BACKEND_APPID=
+          LOG_LEVEL=warn
+          ENVIRONMENT_DISPLAY_NAME_SUFFIX=
+          EOF
+      - name: Install + build FE (prod)
+        working-directory: Workload
+        env:
+          PUBLIC_PATH: /fabric-extensibility-toolkit/
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: |
+          npm install --no-audit --no-fund
+          npm run build:prod
+      - name: List build output
+        run: ls -la build/Frontend || (echo "build/Frontend missing" && exit 1)
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/Frontend
+      - id: deploy
+        uses: actions/deploy-pages@v4
