@@ -1,18 +1,15 @@
-import React, { useState } from "react";
-import { Button, Spinner, Text } from "@fluentui/react-components";
+import React, { useCallback, useEffect, useState } from "react";
+import { Button, Spinner, Text, Badge } from "@fluentui/react-components";
 import { WorkloadClientAPI } from "@ms-fabric/workload-client";
 import { callAcquireFrontendAccessToken } from "../../controller/AuthenticationController";
 
 /**
- * FMD SPIKE — proves the durable native-frontend auth path.
+ * FMD dashboard (native FET frontend) — proves AND demos the host-brokered auth path.
  *
- * The Fabric host brokers a Power BI–audience token via `acquireFrontendAccessToken`
- * (callAcquireFrontendAccessToken), and we call the Entra-protected FMD onboarding UDF directly with
- * it. No `@azure/msal-browser`, no popup, no iframe handoff — i.e. none of the failure modes the
- * rayfin app hit (monitor_window_timeout / interaction_in_progress / popup handoff). If this button
- * renders the KPIs inside the Fabric portal, the FET frontend is the right home for the FMD UI.
- *
- * Spike config is hardcoded to FMD-DEV for the proof; productionize via the workload env/config.
+ * On open it asks the Fabric HOST for a Power BI–audience token (acquireFrontendAccessToken — no
+ * MSAL, no popup, no iframe handoff) and calls the Entra-protected FMD UDF directly: dashboard_kpis
+ * for the headline counts and list_sources for the Domain → subject_area → dataset tree. Spike
+ * config hardcoded to FMD-DEV; productionize via workload env/config.
  */
 const UDF_BASE =
   "https://32ff430a586143028cf3bc7d75cc3093.z32.userdatafunctions.fabric.microsoft.com" +
@@ -20,50 +17,127 @@ const UDF_BASE =
   "/userDataFunctions/42bbfd68-e376-4209-9a94-30d2922b2483";
 const UDF_SCOPE = "https://analysis.windows.net/powerbi/api/UserDataFunction.Execute.All";
 
-export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClientAPI }) {
-  const [status, setStatus] = useState<string>("");
-  const [kpis, setKpis] = useState<Record<string, unknown> | null>(null);
-  const [busy, setBusy] = useState<boolean>(false);
+type Kpis = Record<string, number>;
+interface SourceRow {
+  domain: string | null;
+  subject_area: string | null;
+  asset: string | null;
+  lane: string | null;
+  readiness_code: string | null;
+}
 
-  async function probe(): Promise<void> {
-    setBusy(true);
-    setKpis(null);
-    setStatus("acquiring host-brokered token…");
+async function invokeUdf<T>(token: string, fn: string): Promise<T> {
+  const r = await fetch(`${UDF_BASE}/functions/${fn}/invoke`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  const body = await r.json();
+  if (body.status !== "Succeeded") {
+    throw new Error(`${fn}: ${body.status} ${JSON.stringify(body.errors)}`);
+  }
+  return body.output as T;
+}
+
+const tone = (code: string | null): "success" | "warning" | "danger" | "informative" => {
+  const c = (code || "").toUpperCase();
+  if (c === "READY") return "success";
+  if (c === "PENDING") return "warning";
+  if (c.includes("NO_CONNECTION") || c.includes("FAILED") || c.includes("BLOCK")) return "danger";
+  return "informative";
+};
+
+const KPI_CARDS: [string, string][] = [
+  ["sources", "Sources"], ["assets", "Assets"], ["ready", "Ready"],
+  ["pending", "Pending"], ["blocked", "Blocked"], ["quarantined", "Quarantined"],
+];
+
+export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClientAPI }) {
+  const [kpis, setKpis] = useState<Kpis | null>(null);
+  const [sources, setSources] = useState<SourceRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      // THE point of the spike: the host returns the token — we never instantiate MSAL.
+      // The whole point: the host hands us the token — we never touch MSAL.
       const { token } = await callAcquireFrontendAccessToken(workloadClient, UDF_SCOPE);
-      setStatus("calling FMD UDF dashboard_kpis…");
-      const r = await fetch(`${UDF_BASE}/functions/dashboard_kpis/invoke`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: "{}",
-      });
-      const body = await r.json();
-      if (body.status !== "Succeeded") {
-        throw new Error(`UDF status ${body.status}: ${JSON.stringify(body.errors)}`);
-      }
-      setKpis(body.output);
-      setStatus("✅ host-brokered token → UDF OK");
+      const [k, s] = await Promise.all([
+        invokeUdf<Kpis>(token, "dashboard_kpis"),
+        invokeUdf<SourceRow[]>(token, "list_sources"),
+      ]);
+      setKpis(k);
+      setSources(Array.isArray(s) ? s : []);
     } catch (e) {
-      setStatus(`❌ ${e instanceof Error ? e.message : String(e)}`);
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
+  }, [workloadClient]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Group sources: Domain -> subject_area -> datasets
+  const domains = new Map<string, Map<string, SourceRow[]>>();
+  for (const r of sources) {
+    const d = r.domain || "(unknown)";
+    const sa = r.subject_area || "(none)";
+    const m = domains.get(d) || new Map<string, SourceRow[]>();
+    (m.get(sa) || m.set(sa, []).get(sa)!).push(r);
+    domains.set(d, m);
   }
 
   return (
-    <div style={{ padding: 16, borderTop: "1px solid #eee" }}>
-      <Text weight="semibold">FMD spike — host-brokered token → UDF</Text>
-      <div style={{ marginTop: 8 }}>
-        <Button appearance="primary" onClick={probe} disabled={busy}>
-          {busy ? <Spinner size="tiny" label="Working…" /> : "Call FMD UDF (dashboard_kpis)"}
-        </Button>
+    <div style={{ padding: 20, maxWidth: 1100 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <Text size={600} weight="bold">FMD — Bronze Ingestion Control Plane</Text>
+        <Button size="small" onClick={() => void load()} disabled={loading}>Refresh</Button>
+        {loading && <Spinner size="tiny" label="Loading via host-brokered token…" />}
       </div>
-      {status && <p style={{ marginTop: 8 }}>{status}</p>}
+
+      {error && (
+        <p role="alert" style={{ color: "#b10e1c", marginTop: 12 }}>⚠️ {error}</p>
+      )}
+
       {kpis && (
-        <pre style={{ marginTop: 8, background: "#f3f3f3", padding: 8 }}>
-          {JSON.stringify(kpis, null, 2)}
-        </pre>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 16 }}>
+          {KPI_CARDS.map(([key, label]) => (
+            <div key={key} style={{
+              minWidth: 130, padding: 16, borderRadius: 8, background: "#f5f5f5",
+              border: "1px solid #e0e0e0",
+            }}>
+              <Text size={800} weight="bold">{kpis[key] ?? 0}</Text>
+              <div><Text size={200}>{label}</Text></div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {domains.size > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <Text size={500} weight="semibold">Sources — Domain → Subject area → Dataset</Text>
+          {[...domains.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([domain, areas]) => (
+            <div key={domain} style={{ marginTop: 12 }}>
+              <Text weight="bold">{domain.replace("__DEMO__", "")}</Text>
+              {[...areas.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([sa, rows]) => (
+                <div key={sa} style={{ marginLeft: 16, marginTop: 4 }}>
+                  <Text size={300} style={{ color: "#616161", textTransform: "uppercase" }}>{sa}</Text>
+                  {rows.map((r, i) => (
+                    <div key={i} style={{ marginLeft: 16, display: "flex", gap: 8, alignItems: "center", padding: "2px 0" }}>
+                      <Text size={300}>{r.asset}</Text>
+                      <Badge size="small" appearance="outline">{r.lane}</Badge>
+                      <Badge size="small" color={tone(r.readiness_code)}>{r.readiness_code || "—"}</Badge>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
