@@ -125,7 +125,7 @@ export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClient
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<void> => {
     setLoading(true);
     setError(null);
     try {
@@ -164,7 +164,7 @@ export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClient
     <div style={{ padding: 20, maxWidth: 1100 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <Text size={600} weight="bold">FMD — Bronze Ingestion Control Plane</Text>
-        <Button size="small" onClick={() => void load()} disabled={loading}>Refresh</Button>
+        <Button size="small" onClick={() => { void load(); }} disabled={loading}>Refresh</Button>
         {loading && <Spinner size="tiny" label="Loading via host-brokered token…" />}
       </div>
 
