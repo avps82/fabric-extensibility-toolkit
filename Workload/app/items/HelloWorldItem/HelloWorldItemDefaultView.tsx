@@ -49,14 +49,14 @@ export function HelloWorldItemDefaultView({
       center={{
          content: (
           <>
+            {/* FMD control-plane dashboard — host-brokered token -> UDF (front and center). */}
+            <FmdUdfProbe workloadClient={workloadClient} />
             <ItemDetailsSection
               item={item}
               messageValue={messageValue}
               onMessageChange={onMessageChange}
               onOpenResource={handleOpenResource}
             />
-            {/* FMD spike: host-brokered token -> UDF (proves the native-frontend auth path). */}
-            <FmdUdfProbe workloadClient={workloadClient} />
           </>
         )
       }}
