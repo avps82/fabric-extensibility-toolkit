@@ -7,9 +7,9 @@ import { callAcquireFrontendAccessToken } from "../../controller/AuthenticationC
  * FMD dashboard (native FET frontend) — proves AND demos the host-brokered auth path.
  *
  * On open it asks the Fabric HOST for a Power BI–audience token (acquireFrontendAccessToken — no
- * MSAL, no popup, no iframe handoff) and calls the Entra-protected FMD UDF directly: dashboard_kpis
- * for the headline counts and list_sources for the Domain → subject_area → dataset tree. Spike
- * config hardcoded to FMD-DEV; productionize via workload env/config.
+ * MSAL, no popup, no iframe handoff) and calls the Entra-protected FMD UDF directly: dashboard_kpis,
+ * list_sources (Domain → subject_area → dataset), lane_summary and list_jobs. Spike config hardcoded
+ * to FMD-DEV; productionize via workload env/config.
  */
 const UDF_BASE =
   "https://32ff430a586143028cf3bc7d75cc3093.z32.userdatafunctions.fabric.microsoft.com" +
@@ -19,11 +19,16 @@ const UDF_SCOPE = "https://analysis.windows.net/powerbi/api/UserDataFunction.Exe
 
 type Kpis = Record<string, number>;
 interface SourceRow {
-  domain: string | null;
-  subject_area: string | null;
-  asset: string | null;
-  lane: string | null;
-  readiness_code: string | null;
+  domain: string | null; subject_area: string | null; asset: string | null;
+  lane: string | null; readiness_code: string | null;
+}
+interface LaneRow {
+  lane: string | null; asset_count: number; ready_count: number;
+  pending_count: number; blocked_count: number;
+}
+interface JobRow {
+  asset_name: string | null; acquisition_type: string | null;
+  status: string | null; started_utc: string | null;
 }
 
 async function invokeUdf<T>(token: string, fn: string): Promise<T> {
@@ -39,11 +44,19 @@ async function invokeUdf<T>(token: string, fn: string): Promise<T> {
   return body.output as T;
 }
 
-const tone = (code: string | null): "success" | "warning" | "danger" | "informative" => {
+type Tone = "success" | "warning" | "danger" | "informative";
+const readinessTone = (code: string | null): Tone => {
   const c = (code || "").toUpperCase();
   if (c === "READY") return "success";
   if (c === "PENDING") return "warning";
   if (c.includes("NO_CONNECTION") || c.includes("FAILED") || c.includes("BLOCK")) return "danger";
+  return "informative";
+};
+const statusTone = (s: string | null): Tone => {
+  const c = (s || "").toUpperCase();
+  if (c === "SUCCEEDED") return "success";
+  if (c === "FAILED" || c === "QUARANTINED") return "danger";
+  if (c === "RUNNING" || c === "STARTED") return "warning";
   return "informative";
 };
 
@@ -51,10 +64,64 @@ const KPI_CARDS: [string, string][] = [
   ["sources", "Sources"], ["assets", "Assets"], ["ready", "Ready"],
   ["pending", "Pending"], ["blocked", "Blocked"], ["quarantined", "Quarantined"],
 ];
+const th: React.CSSProperties = { textAlign: "left", padding: "6px 10px", borderBottom: "2px solid #ddd" };
+const td: React.CSSProperties = { padding: "6px 10px", borderBottom: "1px solid #eee", fontSize: 13 };
+
+function LanesTile({ lanes }: { lanes: LaneRow[] }) {
+  return (
+    <div style={{ marginTop: 24 }}>
+      <Text size={500} weight="semibold">Lanes</Text>
+      <table style={{ borderCollapse: "collapse", marginTop: 8, minWidth: 460 }}>
+        <thead>
+          <tr><th style={th}>Lane</th><th style={th}>Assets</th><th style={th}>Ready</th>
+            <th style={th}>Pending</th><th style={th}>Blocked</th></tr>
+        </thead>
+        <tbody>
+          {lanes.map((l, i) => (
+            <tr key={i}>
+              <td style={td}><Badge size="small" appearance="outline">{l.lane}</Badge></td>
+              <td style={td}>{l.asset_count}</td>
+              <td style={td}>{l.ready_count}</td>
+              <td style={td}>{l.pending_count}</td>
+              <td style={td}>{l.blocked_count}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function JobsTile({ jobs }: { jobs: JobRow[] }) {
+  return (
+    <div style={{ marginTop: 24 }}>
+      <Text size={500} weight="semibold">Recent jobs</Text>
+      <table style={{ borderCollapse: "collapse", marginTop: 8, minWidth: 560 }}>
+        <thead>
+          <tr><th style={th}>Asset</th><th style={th}>Lane</th><th style={th}>Status</th>
+            <th style={th}>Started</th></tr>
+        </thead>
+        <tbody>
+          {jobs.slice(0, 8).map((j, i) => (
+            <tr key={i}>
+              <td style={td}>{j.asset_name}</td>
+              <td style={td}>{j.acquisition_type}</td>
+              <td style={td}><Badge size="small" color={statusTone(j.status)}>{j.status || "—"}</Badge></td>
+              <td style={td}>{j.started_utc ? j.started_utc.slice(0, 19).replace("T", " ") : "—"}</td>
+            </tr>
+          ))}
+          {jobs.length === 0 && <tr><td style={td} colSpan={4}>No runs yet.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClientAPI }) {
   const [kpis, setKpis] = useState<Kpis | null>(null);
   const [sources, setSources] = useState<SourceRow[]>([]);
+  const [lanes, setLanes] = useState<LaneRow[]>([]);
+  const [jobs, setJobs] = useState<JobRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
 
@@ -64,12 +131,16 @@ export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClient
     try {
       // The whole point: the host hands us the token — we never touch MSAL.
       const { token } = await callAcquireFrontendAccessToken(workloadClient, UDF_SCOPE);
-      const [k, s] = await Promise.all([
+      const [k, s, l, j] = await Promise.all([
         invokeUdf<Kpis>(token, "dashboard_kpis"),
         invokeUdf<SourceRow[]>(token, "list_sources"),
+        invokeUdf<LaneRow[]>(token, "lane_summary"),
+        invokeUdf<JobRow[]>(token, "list_jobs"),
       ]);
       setKpis(k);
       setSources(Array.isArray(s) ? s : []);
+      setLanes(Array.isArray(l) ? l : []);
+      setJobs(Array.isArray(j) ? j : []);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -77,9 +148,7 @@ export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClient
     }
   }, [workloadClient]);
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   // Group sources: Domain -> subject_area -> datasets
   const domains = new Map<string, Map<string, SourceRow[]>>();
@@ -99,9 +168,7 @@ export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClient
         {loading && <Spinner size="tiny" label="Loading via host-brokered token…" />}
       </div>
 
-      {error && (
-        <p role="alert" style={{ color: "#b10e1c", marginTop: 12 }}>⚠️ {error}</p>
-      )}
+      {error && <p role="alert" style={{ color: "#b10e1c", marginTop: 12 }}>⚠️ {error}</p>}
 
       {kpis && (
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 16 }}>
@@ -130,7 +197,7 @@ export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClient
                     <div key={i} style={{ marginLeft: 16, display: "flex", gap: 8, alignItems: "center", padding: "2px 0" }}>
                       <Text size={300}>{r.asset}</Text>
                       <Badge size="small" appearance="outline">{r.lane}</Badge>
-                      <Badge size="small" color={tone(r.readiness_code)}>{r.readiness_code || "—"}</Badge>
+                      <Badge size="small" color={readinessTone(r.readiness_code)}>{r.readiness_code || "—"}</Badge>
                     </div>
                   ))}
                 </div>
@@ -139,6 +206,9 @@ export function FmdUdfProbe({ workloadClient }: { workloadClient: WorkloadClient
           ))}
         </div>
       )}
+
+      {lanes.length > 0 && <LanesTile lanes={lanes} />}
+      {kpis && <JobsTile jobs={jobs} />}
     </div>
   );
 }
